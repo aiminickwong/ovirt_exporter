@@ -5,9 +5,6 @@
 
 Exporter for oVirt engine metrics to use with https://prometheus.io/
 
-## Remarks
-this is an early version
-
 ## Install
 ```
 go get -u github.com/czerwonk/ovirt_exporter
@@ -17,6 +14,7 @@ go get -u github.com/czerwonk/ovirt_exporter
 * hosts
 * vms
 * storagedomains
+* snapshots (optional)
 
 ## Third Party Components
 This software uses components of the following projects

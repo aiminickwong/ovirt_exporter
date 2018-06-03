@@ -1,8 +1,10 @@
 package storagedomain
 
 import (
-	"github.com/czerwonk/ovirt_exporter/api"
-	"github.com/czerwonk/ovirt_exporter/datacenter"
+	"sync"
+
+	"github.com/czerwonk/ovirt_api/api"
+	"github.com/czerwonk/ovirt_exporter/metric"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/log"
 )
@@ -12,37 +14,47 @@ const prefix = "ovirt_storage_"
 var (
 	availableDesc *prometheus.Desc
 	usedDesc      *prometheus.Desc
-	commitedDesc  *prometheus.Desc
+	committedDesc *prometheus.Desc
 	masterDesc    *prometheus.Desc
 	upDesc        *prometheus.Desc
 )
 
 func init() {
-	l := []string{"name", "type", "path", "datacenter"}
+	l := []string{"name", "type", "path"}
 	availableDesc = prometheus.NewDesc(prefix+"available_bytes", "Available space in bytes", l, nil)
 	usedDesc = prometheus.NewDesc(prefix+"used_bytes", "Used space in bytes", l, nil)
-	commitedDesc = prometheus.NewDesc(prefix+"commited_bytes", "Commited space in bytes", l, nil)
+	committedDesc = prometheus.NewDesc(prefix+"committed_bytes", "Committed space in bytes", l, nil)
 	upDesc = prometheus.NewDesc(prefix+"up", "Status of storage domain", l, nil)
 	masterDesc = prometheus.NewDesc(prefix+"master", "Storage domain is master", l, nil)
 }
 
 // StorageDomainCollector collects storage domain statistics from oVirt
 type StorageDomainCollector struct {
-	api                 *api.ApiClient
-	datacenterRetriever *datacenter.DatacenterRetriever
+	client *api.Client
 }
 
 // NewCollector creates a new collector
-func NewCollector(c *api.ApiClient) prometheus.Collector {
-	dc := datacenter.NewRetriever(c)
-	return &StorageDomainCollector{api: c, datacenterRetriever: dc}
+func NewCollector(client *api.Client) prometheus.Collector {
+	return &StorageDomainCollector{client: client}
 }
 
 // Collect implements Prometheus Collector interface
 func (c *StorageDomainCollector) Collect(ch chan<- prometheus.Metric) {
-	for _, d := range c.getDomains() {
-		c.collectMetricsForDomain(&d, ch)
+	s := StorageDomains{}
+	err := c.client.GetAndParse("storagedomains", &s)
+	if err != nil {
+		log.Error(err)
+		return
 	}
+
+	wg := &sync.WaitGroup{}
+	wg.Add(len(s.Domains))
+
+	for _, h := range s.Domains {
+		go c.collectMetricsForDomain(h, ch, wg)
+	}
+
+	wg.Wait()
 }
 
 // Describe implements Prometheus Collector interface
@@ -51,34 +63,21 @@ func (c *StorageDomainCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- masterDesc
 	ch <- availableDesc
 	ch <- usedDesc
-	ch <- commitedDesc
+	ch <- committedDesc
 }
 
-func (c *StorageDomainCollector) getDomains() []StorageDomain {
-	var domains StorageDomains
-	err := c.api.GetAndParse("storagedomains", &domains)
+func (c *StorageDomainCollector) collectMetricsForDomain(domain StorageDomain, ch chan<- prometheus.Metric, wg *sync.WaitGroup) {
+	defer wg.Done()
 
-	if err != nil {
-		log.Error(err)
-	}
-
-	return domains.Domains
-}
-
-func (c *StorageDomainCollector) collectMetricsForDomain(d *StorageDomain, ch chan<- prometheus.Metric) {
-	dc, err := c.datacenterRetriever.Get(d.DataCenters.DataCenter.Id)
-	if err != nil {
-		log.Error(err)
-	}
-
-	l := []string{d.Name, d.Type, d.Storage.Path, dc.Name}
+	d := &domain
+	l := []string{d.Name, string(d.Type), d.Storage.Path}
 
 	up := d.ExternalStatus == "ok"
-	ch <- prometheus.MustNewConstMetric(upDesc, prometheus.GaugeValue, boolToFloat(up), l...)
-	ch <- prometheus.MustNewConstMetric(masterDesc, prometheus.GaugeValue, boolToFloat(d.Master), l...)
-	ch <- prometheus.MustNewConstMetric(availableDesc, prometheus.GaugeValue, d.Available, l...)
-	ch <- prometheus.MustNewConstMetric(usedDesc, prometheus.GaugeValue, d.Used, l...)
-	ch <- prometheus.MustNewConstMetric(commitedDesc, prometheus.GaugeValue, d.Committed, l...)
+	ch <- metric.MustCreate(upDesc, boolToFloat(up), l)
+	ch <- metric.MustCreate(masterDesc, boolToFloat(d.Master), l)
+	ch <- metric.MustCreate(availableDesc, float64(d.Available), l)
+	ch <- metric.MustCreate(usedDesc, float64(d.Used), l)
+	ch <- metric.MustCreate(committedDesc, float64(d.Committed), l)
 }
 
 func boolToFloat(b bool) float64 {

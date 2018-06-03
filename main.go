@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/czerwonk/ovirt_exporter/api"
+	"github.com/czerwonk/ovirt_api/api"
 	"github.com/czerwonk/ovirt_exporter/host"
 	"github.com/czerwonk/ovirt_exporter/storagedomain"
 	"github.com/czerwonk/ovirt_exporter/vm"
@@ -15,17 +15,19 @@ import (
 	"github.com/prometheus/common/log"
 )
 
-const version string = "0.4.0"
+const version string = "0.8.2"
 
 var (
 	showVersion     = flag.Bool("version", false, "Print version information.")
 	listenAddress   = flag.String("web.listen-address", ":9325", "Address on which to expose metrics and web interface.")
 	metricsPath     = flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics.")
-	apiUrl          = flag.String("api.url", "https://localhost/ovirt-engine/api/", "API REST Endpoint")
+	apiURL          = flag.String("api.url", "https://localhost/ovirt-engine/api/", "API REST Endpoint")
 	apiUser         = flag.String("api.username", "user@internal", "API username")
 	apiPass         = flag.String("api.password", "", "API password")
 	apiInsecureCert = flag.Bool("api.insecure-cert", false, "Skip verification for untrusted SSL/TLS certificates")
-	client          *api.ApiClient
+	withSnapshots   = flag.Bool("with-snapshots", true, "Collect snapshot metrics (can be time consuming in some cases)")
+	withNetwork     = flag.Bool("with-network", true, "Collect network metrics (can be time consuming in some cases)")
+	debug           = flag.Bool("debug", false, "Show verbose output (e.g. body of each response received from API)")
 )
 
 func init() {
@@ -55,7 +57,8 @@ func printVersion() {
 }
 
 func startServer() {
-	log.Infof("Starting oVirt exporter (Version: %s)\n", version)
+	log.Infof("Starting oVirt exporter (Version: %s)", version)
+
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`<html>
 			<head><title>oVirt Exporter (Version ` + version + `)</title></head>
@@ -67,18 +70,44 @@ func startServer() {
 			</body>
 			</html>`))
 	})
-	http.HandleFunc(*metricsPath, handleMetricsRequest)
 
-	client = api.NewClient(*apiUrl, *apiUser, *apiPass, *apiInsecureCert)
+	client, err := connectAPI()
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer client.Close()
 
-	log.Infof("Listening for %s on %s\n", *metricsPath, *listenAddress)
+	http.HandleFunc(*metricsPath, func(w http.ResponseWriter, r *http.Request) {
+		handleMetricsRequest(w, r, client)
+	})
+
+	log.Infof("Listening for %s on %s", *metricsPath, *listenAddress)
 	log.Fatal(http.ListenAndServe(*listenAddress, nil))
 }
 
-func handleMetricsRequest(w http.ResponseWriter, r *http.Request) {
+func connectAPI() (*api.Client, error) {
+	opts := []api.ClientOption{api.WithLogger(&PromLogger{})}
+
+	if *debug {
+		opts = append(opts, api.WithDebug())
+	}
+
+	if *apiInsecureCert {
+		opts = append(opts, api.WithInsecure())
+	}
+
+	client, err := api.NewClient(*apiURL, *apiUser, *apiPass, opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	return client, err
+}
+
+func handleMetricsRequest(w http.ResponseWriter, r *http.Request, client *api.Client) {
 	reg := prometheus.NewRegistry()
-	reg.MustRegister(vm.NewCollector(client))
-	reg.MustRegister(host.NewCollector(client))
+	reg.MustRegister(vm.NewCollector(client, *withSnapshots, *withNetwork))
+	reg.MustRegister(host.NewCollector(client, *withNetwork))
 	reg.MustRegister(storagedomain.NewCollector(client))
 
 	promhttp.HandlerFor(reg, promhttp.HandlerOpts{
